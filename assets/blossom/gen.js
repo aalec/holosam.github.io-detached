@@ -86,6 +86,23 @@
     return out;
   }
 
+  // How often each letter starts an English word — the target shape for a
+  // chain's start letters (see corrFactor below). Percent of SCOWL-60 US
+  // entries, lengths 4-8, N=40,769. Reproduce with:
+  //   awk 'f && /^[a-z]+$/ && length>=4 && length<=8 {c[substr($0,1,1)]++; n++}
+  //        /^---$/{f=1} END{for (l in c) printf "%s %.2f\n", l, 100*c[l]/n}' \
+  //     assets/blossom/scowl-60.txt | sort
+  //
+  // Hardcoded on purpose: derived at build time from BLOSSOM_WORDS, one
+  // validate-only word would shift every corrFactor and silently regenerate
+  // every future board. Editing these numbers changes all future boards.
+  const ENGLISH_FIRST_LETTER_PCT = {
+    a: 4.75, b: 7.23, c: 8.91, d: 5.91, e: 3.25, f: 4.97, g: 4.05,
+    h: 3.85, i: 2.10, j: 1.24, k: 1.00, l: 3.77, m: 5.12, n: 1.90,
+    o: 2.14, p: 7.36, q: 0.53, r: 5.98, s: 12.52, t: 5.81, u: 1.80,
+    v: 1.59, w: 3.43, x: 0.08, y: 0.42, z: 0.28,
+  };
+
   function generateBoard(seed, genPool, options) {
     const opts = options || {};
     const targetTiles = opts.targetTiles || 21;
@@ -96,7 +113,7 @@
     const lengthAlpha = opts.lengthAlpha != null ? opts.lengthAlpha : 0.6;
     // Intrinsic per-length preference (default 1), damping the short/long
     // extremes so they sprinkle in without dominating the mix.
-    const lengthWeight = opts.lengthWeight || { 4: 0.75, 5: 0.9, 7: 1.15, 8: 0.5 };
+    const lengthWeight = opts.lengthWeight || { 4: 1.1, 5: 0.9, 7: 1.15, 8: 0.5 };
     // Localized-overlap weighting: reward letters that can reuse a tile near the
     // junction, weighting the word's earliest letters most (the ones the greedy
     // placer can actually fold back onto an existing tile).
@@ -104,6 +121,8 @@
     const overlapDecay = opts.overlapDecay != null ? opts.overlapDecay : 0.8;
     // Floor weight for words with no local overlap.
     const overlapFloor = opts.overlapFloor != null ? opts.overlapFloor : 0.3;
+    // Clamps corrFactor (below) to [1/cap, cap].
+    const corrFactorCap = opts.corrFactorCap != null ? opts.corrFactorCap : 3;
     const targetLetters = targetTiles * 1.5;
     // Runaway guard: cap total placement attempts before reseeding. Normal
     // generation never approaches this.
@@ -112,19 +131,30 @@
     const genByFirst = {};
     for (const w of genPool) (genByFirst[w[0]] ||= []).push(w);
 
-    // Per-letter correction factors: up-weight candidates ending on letters that
-    // are common chain-starters, down-weight rare ones, so the chain's stationary
-    // distribution tracks the pool's first-letter (not last-letter) distribution.
-    const poolFirstCount = {};
+    // Each word after the first STARTS on the previous word's last letter, so
+    // the chain's start letters are just the letters we pick words to END on.
+    // Uncorrected that follows how English words end (e/y/t/n/r/s), not how
+    // they start. So weight each candidate by
+    //
+    //   corrFactor[last letter] = target share / our pool's supply share
+    //
+    // target = ENGLISH_FIRST_LETTER_PCT (opts.letterFreq overrides, for the
+    // metrics scripts); supply = how often the pool offers that ending. Both
+    // normalized, so corrFactorCap means the same thing either way.
     const poolLastCount = {};
     for (const w of genPool) {
-      poolFirstCount[w[0]] = (poolFirstCount[w[0]] || 0) + 1;
       poolLastCount[w[w.length - 1]] = (poolLastCount[w[w.length - 1]] || 0) + 1;
     }
+    const targetCount = opts.letterFreq || ENGLISH_FIRST_LETTER_PCT;
+    let targetTotal = 0, supplyTotal = 0;
+    for (const l in targetCount) targetTotal += targetCount[l];
+    for (const l in poolLastCount) supplyTotal += poolLastCount[l];
     const corrFactor = {};
     for (const l in poolLastCount) {
-      corrFactor[l] =
-        ((poolFirstCount[l] || 0) + 1e-9) / (poolLastCount[l] + 1e-9);
+      const target = (targetCount[l] || 0) / targetTotal;
+      const supply = poolLastCount[l] / supplyTotal;
+      const ratio = (target + 1e-9) / (supply + 1e-9);
+      corrFactor[l] = Math.min(Math.max(ratio, 1 / corrFactorCap), corrFactorCap);
     }
 
     // Every decision below — seed word, each subsequent word, every tile

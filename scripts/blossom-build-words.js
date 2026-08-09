@@ -37,6 +37,7 @@ const OUT_PATH = path.join(ROOT, 'assets/blossom/words.js');
 
 const MIN_LEN = 3;
 const MAX_LEN = 12;
+const GEN_MIN_LEN = 4;
 const GEN_MAX_LEN = 8;
 
 if (!fs.existsSync(SCOWL_PATH)) {
@@ -75,7 +76,7 @@ const gen = fs.readFileSync(WORD_BANK_PATH, 'utf8')
   .split('\n')
   .map(s => s.trim().toLowerCase())
   .filter(w => onlyLowerLetters.test(w))
-  .filter(w => w.length >= MIN_LEN && w.length <= GEN_MAX_LEN);
+  .filter(w => w.length >= GEN_MIN_LEN && w.length <= GEN_MAX_LEN);
 
 const genSet = new Set(gen);
 for (const w of genSet) valid.add(w);
@@ -100,7 +101,7 @@ const out = `// Word lists for Blossom. GENERATED — do not edit by hand.
 //                       lengths ${MIN_LEN}-${MAX_LEN}, plus all generation words
 //                       and extra_words.txt).
 //   BLOSSOM_GEN_WORDS = chain-generation pool (curated word_bank.txt,
-//                       capped at ${GEN_MAX_LEN} letters).
+//                       lengths ${GEN_MIN_LEN}-${GEN_MAX_LEN}).
 // See scripts/blossom-build-words.js for source, license, and trade-offs.
 // Each list ships as one newline-joined string, split at load — smaller on the
 // wire and much cheaper for mobile JS engines to parse than a ~${Math.round(validSorted.length / 1000)}k-element
