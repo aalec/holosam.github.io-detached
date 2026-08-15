@@ -11,3 +11,10 @@
 /personal/
 /tmp/
 /assets/blossom/scowl-60.txt
+
+# Licensed word-frequency / prevalence norms for scripts/blossom-difficulty.py.
+# See assets/blossom/DIFFICULTY.md.
+scripts/data/
+
+# Python bytecode from scripts/
+scripts/__pycache__/

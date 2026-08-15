@@ -6,6 +6,13 @@
 //   • word-length distribution
 //   • overlap depth: inter-word and intra-word (consecutive reuse runs)
 //
+// And bank health across the same sample:
+//   • word-sampling skew: how often each bank word is drawn
+//   • boards to first repeated word, against the uniform-sampling ceiling
+//   • start-letter RMS: chain start letters vs English first-letter frequency
+//
+// Per-board difficulty: scripts/blossom-difficulty.py, assets/blossom/DIFFICULTY.md.
+//
 // Definitions:
 //   totalLetters = sum of all word lengths in the chain
 //   junctions    = chain.length - 1  (shared letter between consecutive words)
@@ -97,6 +104,12 @@ function overlapDepths(board) {
 const words = [], tiles = [], rate = [];
 const lengthCounts = {};
 const allInter = {}, allIntra = {};
+const useCount = new Map();     // bank word -> times drawn
+const startLetter = {};         // first letter of each chain word -> count
+let chainWordTotal = 0;
+let boardsToRepeat = [];        // boards seen before a word repeats
+let sinceRepeat = 0;
+const seenSinceRepeat = new Set();
 
 process.stderr.write(`Generating ${N} boards…\n`);
 for (let i = 0; i < N; i++) {
@@ -119,6 +132,23 @@ for (let i = 0; i < N; i++) {
   }
   for (const len in lengthCounts)
     if (lengthCounts[len].length <= i) lengthCounts[len].push(0);
+
+  for (const w of chain) {
+    useCount.set(w, (useCount.get(w) || 0) + 1);
+    startLetter[w[0]] = (startLetter[w[0]] || 0) + 1;
+    chainWordTotal++;
+  }
+
+  // Boards until a word recurs, restarting the count at each repeat.
+  sinceRepeat++;
+  let repeated = false;
+  for (const w of chain) if (seenSinceRepeat.has(w)) { repeated = true; break; }
+  if (repeated) {
+    boardsToRepeat.push(sinceRepeat);
+    sinceRepeat = 0;
+    seenSinceRepeat.clear();
+  }
+  for (const w of chain) seenSinceRepeat.add(w);
 
   const { intraCounts, interCounts } = overlapDepths(board);
   for (const [d, c] of Object.entries(interCounts)) allInter[d] = (allInter[d] || 0) + c;
@@ -153,3 +183,46 @@ console.log(`  inter-word (tile shared with another word):`);
 printDepths('inter', allInter);
 console.log(`  intra-word (tile revisited within same word):`);
 printDepths('intra', allIntra);
+
+// ── bank health ───────────────────────────────────────────────────────────────
+
+console.log(`\n${hr}\nBank health (pool of ${pool.length} words)`);
+
+const counts = pool.map(w => useCount.get(w) || 0);
+const bands = [[101, Infinity], [31, 100], [10, 30], [4, 9], [1, 3], [0, 0]];
+const label = { '101': '> 100', '31': '31-100', '10': '10-30', '4': '4-9', '1': '1-3', '0': 'never used' };
+console.log(`\nword-sampling skew (times drawn over ${N} boards):`);
+for (const [lo, hi] of bands) {
+  const n = counts.filter(c => c >= lo && c <= hi).length;
+  console.log(`  ${label[String(lo)].padEnd(11)} ${String(n).padStart(5)}  (${(100 * n / pool.length).toFixed(1)}%)`);
+}
+let topWord = null, topN = 0;
+for (const [w, c] of useCount) if (c > topN) { topN = c; topWord = w; }
+console.log(`  most drawn:  ${topWord} (${topN}x)`);
+
+// Birthday bound: first collision near sqrt(pi*N/2) draws, over k draws/board.
+const wpb = mean(words);
+const ceiling = Math.sqrt(Math.PI * pool.length / 2) / wpb;
+if (boardsToRepeat.length) {
+  const m = mean(boardsToRepeat);
+  console.log(`\nboards to first repeat: ${fmt(boardsToRepeat)}`);
+  console.log(`  uniform-sampling ceiling: ${ceiling.toFixed(2)}  (${(100 * m / ceiling).toFixed(0)}% of it)`);
+}
+
+// Chain words start on the previous word's last letter, so the achievable
+// distribution is constrained. This measures the gap to English.
+const eng = Gen.ENGLISH_FIRST_LETTER_PCT;
+let sumSq = 0, nL = 0;
+const rows = [];
+for (const l of Object.keys(eng).sort()) {
+  const got = 100 * (startLetter[l] || 0) / chainWordTotal;
+  const want = eng[l];
+  sumSq += ((got - want) / want) ** 2;
+  nL++;
+  rows.push([l, want, got]);
+}
+console.log(`\nstart-letter RMS vs English: ${Math.sqrt(sumSq / nL).toFixed(3)}`);
+const worst = rows.map(([l, want, got]) => [l, want, got, Math.abs(got - want) / want])
+  .sort((a, b) => b[3] - a[3]).slice(0, 5);
+console.log(`  furthest off:  ` + worst.map(([l, want, got]) =>
+  `${l} ${got.toFixed(1)}% vs ${want.toFixed(1)}%`).join(',  '));

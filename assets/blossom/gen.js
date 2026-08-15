@@ -362,6 +362,7 @@
     isAdjacent,
     hexDistance,
     generateBoard,
+    ENGLISH_FIRST_LETTER_PCT,
   };
 
   if (typeof module !== "undefined" && module.exports) {

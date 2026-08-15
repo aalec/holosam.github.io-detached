@@ -19,6 +19,18 @@ It's served purely as a static site with local browser storage.
 - `extra_words.txt` - words that validate but are never chain targets. Managed by `scripts/blossom-add-word.js` / `blossom-remove-word.js`
 - `words.js` - GENERATED from the above plus the gitignored SCOWL dictionary. See `scripts/blossom-build-words.js` for the pipeline
 
+## Difficulty
+
+A board's difficulty is the difficulty of its easiest solution, so it needs a
+solver rather than the generator's intended chain. See `DIFFICULTY.md`.
+
+- `scripts/blossom_solver.py` - every shortest solution to a board
+- `scripts/blossom-difficulty.py` - scores them
+- `scripts/blossom-solve.js --json` - feeds boards to both
+
+Does not run from a fresh clone: the score needs frequency and prevalence norms
+that cannot be redistributed, supplied locally as with the SCOWL dictionary.
+
 ## Philosophy
 
 - This is just for fun! If people want to play every day and work on their streak, great. If someone finds it fun to edit their local browser storage to jack up their streak, that's also great.
