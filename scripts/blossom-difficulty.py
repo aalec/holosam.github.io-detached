@@ -8,10 +8,14 @@
 Scored unit is a (board, solution) pair. A board's difficulty is the score of
 its lowest-scoring solution.
 
-Requires prevalence.tsv and frequency.txt, which are not in this repo. See
-assets/blossom/DIFFICULTY.md. Pass --data DIR or set BLOSSOM_DATA.
+Two weight vectors. WITHIN ranks solutions on one board; ACROSS ranks boards
+against each other. See assets/blossom/DIFFICULTY.md.
+
+Requires prevalence.tsv and frequency.txt, which are not in this repo. Pass
+--data DIR or set BLOSSOM_DATA.
 """
 import argparse
+import collections
 import json
 import math
 import os
@@ -20,22 +24,53 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from blossom_solver import (load_words, neighbors, realizations, render, solve,
-                            to_rc, walks_from_seq)
+from blossom_solver import (neighbors, realizations, render, solve, to_rc,
+                            walks_from_seq)
 
 DATA = os.environ.get("BLOSSOM_DATA",
                       os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
 
-# Fitted on within-board pairwise judgments. See DIFFICULTY.md.
-WEIGHTS = {
+# Ranks solutions on one board. Fitted on 30 within-board judgments.
+WITHIN = {
     "obs_max": 1.0, "obs_early": 1.0, "obs_mean": 0.5,
+    "out_of_range": 0.4, "len_mean": 0.0, "short_frac": 0.0, "rare_min": 0.0,
     "ungen": 1.0, "revisits": 0.3, "turns": 0.1, "old_frac": 0.3,
     "hint": 0.3, "n_words": 0.1,
 }
+
+# Ranks boards against each other. Set from per-term agreement over 25 pairwise
+# and 6 ranked comparisons, not fitted: fitting failed cross-validation, scoring
+# 13/25 held out against 17/25 for this vector. Obscurity is zero because it
+# carries no cross-board signal — taking a minimum over solutions selects for
+# low obscurity, so little variation survives.
+ACROSS = {
+    "old_frac": 1.5, "hint": 1.5, "ungen": 1.0, "out_of_range": 0.5,
+    "revisits": 0.3, "rare_min": 0.2, "turns": 0.1, "n_words": 0.1,
+    "obs_max": 0.0, "obs_early": 0.0, "obs_mean": 0.0,
+    "len_mean": 0.0, "short_frac": 0.0,
+}
+
 PREV_CEILING = 2.58        # probit scale ceiling
 PREV_FLOOR = -1.0          # absent from both norms and frequency
+GEN_LEN_MIN, GEN_LEN_MAX = 4, 8      # word_bank.txt is 4-8 letters
 
-_PREV, _FREQ, _IMPUTE = {}, {}, (0.0, 0.0)
+# Perceived difficulty saturates: above some level boards read as uniformly
+# hard. Monotone, so it reorders nothing; it only widens what counts as
+# indistinguishable at the top.
+SATURATION_K = 1.2
+SCORE_OFFSET = 0.80        # makes every observed raw score positive
+
+# An inflection does not inherit its lemma's familiarity. CHOICEST resolves to
+# CHOICE and scored obscurity 0.00 on a surface form of frequency 0 against the
+# lemma's 77,197. Penalise only forms the corpus does not attest, and exempt
+# plurals: those are fully productive, so an unattested one says nothing.
+UNATTESTED_PENALTY = 0.25
+PRODUCTIVE = {"s", "es", "ies"}
+SUFFIXES = (("s", [""]), ("es", ["", "e"]), ("ies", ["y"]),
+            ("ed", ["", "e"]), ("ing", ["", "e"]),
+            ("er", ["", "e"]), ("ers", ["", "e"]), ("est", ["", "e"]))
+
+_PREV, _FREQ, _IMPUTE, _LETTER_P = {}, {}, (0.0, 0.0), None
 
 
 def load_data(root):
@@ -68,25 +103,28 @@ def load_data(root):
 
 
 def _bases(w):
-    """Candidate lemmas, best guess first. The norms omit most inflections."""
-    y = [w]
-    for suf, adds in (("s", [""]), ("es", ["", "e"]), ("ies", ["y"]),
-                      ("ed", ["", "e"]), ("ing", ["", "e"]),
-                      ("er", ["", "e"]), ("ers", ["", "e"]), ("est", ["", "e"])):
+    """(candidate lemma, suffix) pairs, best guess first."""
+    y = [(w, None)]
+    for suf, adds in SUFFIXES:
         if w.endswith(suf) and len(w) - len(suf) >= 3:
             stem = w[: -len(suf)]
-            y.extend(stem + a for a in adds)
-            if len(stem) >= 3 and stem[-1] == stem[-2]:
-                y.append(stem[:-1])
+            y.extend((stem + a, suf) for a in adds)
+            if len(stem) >= 3 and stem[-1] == stem[-2]:      # stopped -> stop
+                y.append((stem[:-1], suf))
     return y
 
 
 def prevalence(w):
     """Probit prevalence, imputed from frequency if absent. None if neither has it."""
-    for b in _bases(w):
+    for b, suf in _bases(w):
         if b in _PREV:
+            if suf is None or suf in PRODUCTIVE:
+                return _PREV[b]
+            fw, fb = _FREQ.get(w, 0), _FREQ.get(b, 0)
+            if fw == 0 and fb > 0:
+                return _PREV[b] - UNATTESTED_PENALTY * math.log10(fb)
             return _PREV[b]
-    f = max(_FREQ.get(b, 0) for b in _bases(w))
+    f = max(_FREQ.get(b, 0) for b, _ in _bases(w))
     if f > 0:
         # proper nouns are absent from the norms at any frequency
         return min(PREV_CEILING, _IMPUTE[0] * math.log10(f) + _IMPUTE[1])
@@ -96,6 +134,19 @@ def prevalence(w):
 def obscurity(w):
     p = prevalence(w)
     return max(0.0, PREV_CEILING - (PREV_FLOOR if p is None else p))
+
+
+def letter_rarity(w):
+    """Surprisal in bits of the word's most distinctive letter."""
+    global _LETTER_P
+    if _LETTER_P is None:
+        c = collections.Counter()
+        for word, f in _FREQ.items():
+            for ch in word:
+                c[ch] += f
+        tot = sum(c.values())
+        _LETTER_P = {ch: -math.log2(n / tot) for ch, n in c.items()}
+    return max(_LETTER_P.get(ch, 12.0) for ch in w)
 
 
 def _step(a, b):
@@ -146,6 +197,7 @@ def features(tiles, start, words, walks):
     decay = [1.0 / (i + 1) for i in range(n)]
     dsum = sum(decay)
     obs = [obscurity(w) for w in words]
+    lens = [len(w) for w in words]
 
     covered = {start}
     revisits = turns = 0
@@ -164,30 +216,44 @@ def features(tiles, start, words, walks):
         covered |= cells
 
     return {
-        "obs_max":   max(obs),
-        "obs_early": sum(o * d for o, d in zip(obs, decay)) / dsum,
-        "obs_mean":  sum(obs) / n,
-        "ungen":     ungeneratable(walks, tiles, start),
-        "revisits":  revisits / n,
-        "turns":     turns / n,
-        "old_frac":  old / n,
-        "hint":      -hint / n,     # more constrained by remaining tiles = easier
-        "n_words":   n,
+        "obs_max":      max(obs),
+        "obs_early":    sum(o * d for o, d in zip(obs, decay)) / dsum,
+        "obs_mean":     sum(obs) / n,
+        "len_mean":     -sum(lens) / n,
+        "short_frac":   sum(1 for x in lens if x <= 4) / n,
+        "out_of_range": sum(1 for x in lens
+                            if x < GEN_LEN_MIN or x > GEN_LEN_MAX) / n,
+        "rare_min":     -min(letter_rarity(w) for w in words),
+        "ungen":        ungeneratable(walks, tiles, start),
+        "revisits":     revisits / n,
+        "turns":        turns / n,
+        "old_frac":     old / n,
+        "hint":         -hint / n,     # more constrained by remaining = easier
+        "n_words":      n,
     }
 
 
-def score_solution(tiles, start, words, walks=None):
+def perceived(s):
+    """Raw weighted sum -> perceived difficulty."""
+    return SATURATION_K * math.log1p((s + SCORE_OFFSET) / SATURATION_K)
+
+
+def score_solution(tiles, start, words, walks=None, weights=WITHIN):
     if walks is None:
         r = realizations(tiles, start, list(words), limit=1)
         if not r:
             return None, None
         walks = r[0]
     f = features(tiles, start, list(words), walks)
-    return sum(WEIGHTS.get(k, 0) * v for k, v in f.items()), f
+    return sum(weights.get(k, 0) * v for k, v in f.items()), f
 
 
 def score_board(board, max_seconds=90):
-    """Board difficulty: the lowest-scoring solution."""
+    """Board difficulty: the ACROSS score of its easiest solution.
+
+    Easiest is decided by ACROSS too — a board's difficulty is how hard its best
+    route is relative to other boards.
+    """
     tiles = {int(k): v for k, v in board["tiles"].items()}
     start = board["start"]
     sols, complete = solve(tiles, start, max_words=len(board["chain"]),
@@ -198,9 +264,13 @@ def score_board(board, max_seconds=90):
         cands.append(list(board["chain"]))
     scored = []
     for words in cands:
-        s, f = score_solution(tiles, start, words)
-        if s is not None:
-            scored.append((s, words, f))
+        r = realizations(tiles, start, list(words), limit=1)
+        if not r:
+            continue
+        f = features(tiles, start, list(words), r[0])
+        scored.append((sum(ACROSS.get(k, 0) * v for k, v in f.items()),
+                       sum(WITHIN.get(k, 0) * v for k, v in f.items()),
+                       words, f))
     scored.sort(key=lambda x: x[0])
     return dict(tiles=tiles, start=start, scored=scored, complete=complete,
                 n_solutions=len(sols), min_depth=len(sols[0]) if sols else None)
@@ -223,7 +293,8 @@ def main():
         if not r["scored"]:
             print(f"seed {b['seed']}: no solution found")
             continue
-        floor, best, _ = r["scored"][0]
+        raw, _, best, _ = r["scored"][0]
+        floor = perceived(raw)
         floors.append(floor)
         flag = "" if r["complete"] else "  [search incomplete — floor is an upper bound]"
         if args.quiet:
@@ -236,9 +307,10 @@ def main():
         print()
         print(render(r["tiles"], r["start"]))
         print()
-        for s, words, _ in r["scored"][:args.top]:
+        for raw, _, words, _ in r["scored"][:args.top]:
             tag = "  <- generator" if words == list(b["chain"]) else ""
-            print(f"  [{s:5.2f}]  " + " -> ".join(w.upper() for w in words) + tag)
+            print(f"  [{perceived(raw):5.2f}]  "
+                  + " -> ".join(w.upper() for w in words) + tag)
         print()
     if len(floors) > 1:
         print(f"\n{len(floors)} boards   difficulty min {min(floors):.2f}   "
