@@ -3,11 +3,22 @@
 
 Boards come from blossom-solve.js --json.
 
-1. Per start cell, enumerate (word, end_cell, covered_bitmask) walks by DFS
-   through the hex graph and a trie of valid words.
-2. Iterative deepening on word count.
-3. Prune: each further word covers at most 11 new cells (12-letter cap, first
-   letter shared with the previous word's end).
+1. One trie over the whole word list, built once and shared by every board.
+   Walks only follow letters that are on the board, so filtering the list per
+   board changes nothing but the trie's size.
+2. Per start cell, enumerate (covered_bitmask, end_cell, word_id) walks by DFS
+   through the hex graph and the trie.
+3. Iterative deepening on word count, capped at the generator chain's length.
+   The generator's own chain always solves the board, so no answer is above it.
+4. Bounds:
+   a. MAXNEW, the most new cells any single move on this board covers. Replaces
+      the 11 implied by the 12-letter cap, which no generated board reaches.
+   b. reach[k][cell], cells reachable from cell within k words. Prune when an
+      uncovered cell falls outside it.
+   c. Per-move minimum coverage, exact at the last word.
+   d. Memo of failed (cell, covered, depth) states. Word order varies but the
+      states repeat; each entry records the used-words its failure depended on,
+      and is reused only when those are used again.
 """
 import json
 import os
@@ -46,6 +57,29 @@ def load_words(path=WORDS_JS):
         return json.loads(m.group(1))
     m = re.search(r'window\.BLOSSOM_WORDS\s*=\s*"((?:[^"\\]|\\.)*)"', content)
     return m.group(1).split("\\n")
+
+
+class Lexicon:
+    """Word list, trie and id table. One instance serves every board."""
+
+    def __init__(self, words):
+        self.words = [w for w in words if MIN_WORD_LEN <= len(w) <= MAX_WORD_LEN]
+        self.trie = {}
+        for wid, w in enumerate(self.words):
+            node = self.trie
+            for ch in w:
+                node = node.setdefault(ch, {})
+            node[0] = wid
+
+
+_LEX = None
+
+
+def lexicon(path=WORDS_JS):
+    global _LEX
+    if _LEX is None:
+        _LEX = Lexicon(load_words(path))
+    return _LEX
 
 
 def render(tiles, start):
@@ -120,92 +154,149 @@ class TimedOut(Exception):
     pass
 
 
-def solve(tiles, start, max_seconds=90, verbose=False):
+def _moves_from(tiles, nbrs, bits, trie, cell):
+    """(covered_bitmask, end_cell, word_id) for every walk starting at cell."""
+    node0 = trie.get(tiles[cell])
+    if node0 is None:
+        return []
+    seen, out = set(), []
+    stack = [(cell, node0, bits[cell])]
+    while stack:
+        c, node, covered = stack.pop()
+        wid = node.get(0)
+        if wid is not None:
+            key = (wid, c, covered)
+            if key not in seen:
+                seen.add(key)
+                out.append((covered, c, wid))
+        for n in nbrs[c]:
+            child = node.get(tiles[n])
+            if child is not None:
+                stack.append((n, child, covered | bits[n]))
+    return out
+
+
+def solve(tiles, start, max_words=None, max_seconds=90, verbose=False, lex=None):
     """Returns (solutions, complete).
 
     solutions: distinct minimum-length solutions as word lists.
     complete:  False if the time budget expired, making solutions a subset.
+    max_words: cap on iterative deepening. Pass len(board["chain"]).
     """
+    lex = lex or lexicon()
+    words, trie = lex.words, lex.trie
     cells = sorted(tiles)
     bits = {c: 1 << i for i, c in enumerate(cells)}
     N = len(cells)
     FULL = (1 << N) - 1
     nbrs = {c: [n for n in neighbors(c) if n in tiles] for c in cells}
-    on_board = set(tiles.values())
 
-    words = [w for w in load_words()
-             if MIN_WORD_LEN <= len(w) <= MAX_WORD_LEN and set(w) <= on_board]
-    trie = {}
-    for w in words:
-        node = trie
-        for ch in w:
-            node = node.setdefault(ch, {})
-        node[0] = w
-
-    def moves_from(cell):
-        letter = tiles[cell]
-        if letter not in trie:
-            return []
-        seen, out = set(), []
-
-        def dfs(c, node, covered):
-            w = node.get(0)
-            if w is not None:
-                key = (w, c, covered)
-                if key not in seen:
-                    seen.add(key)
-                    out.append((covered, c, w))
-            for n in nbrs[c]:
-                child = node.get(tiles[n])
-                if child is not None:
-                    dfs(n, child, covered | bits[n])
-
-        dfs(cell, trie[letter], bits[cell])
-        return out
-
-    all_moves = {c: moves_from(c) for c in cells}
-    max_cov = {c: max((bin(m[0]).count("1") for m in all_moves[c]), default=0)
+    all_moves = {c: _moves_from(tiles, nbrs, bits, trie, c) for c in cells}
+    max_cov = {c: max((cov.bit_count() for cov, _, _ in all_moves[c]), default=0)
                for c in cells}
+    MAXNEW = max(max_cov.values()) - 1      # the move's own start cell is covered
+    if MAXNEW <= 0:
+        return [], True
 
-    min_depth = -((-(N - 1)) // 11)
-    for depth_cap in range(max(1, min_depth), 15):
+    cap = max_words or 14
+    min_depth = max(1, -((-(N - 1)) // MAXNEW))
+    if min_depth > cap:
+        return [], True
+
+    # reach[k][c]: cells reachable from c within k words.
+    one, ends = {}, {}
+    for c in cells:
+        m = 0
+        for cov, _, _ in all_moves[c]:
+            m |= cov
+        one[c] = m
+        ends[c] = {e for _, e, _ in all_moves[c]}
+    reach = [dict.fromkeys(cells, 0), one]
+    for k in range(2, cap + 1):
+        prev = reach[k - 1]
+        cur = {}
+        for c in cells:
+            m = one[c]
+            for e in ends[c]:
+                m |= prev[e]
+            cur[c] = m
+        reach.append(cur)
+
+    EMPTY = frozenset()
+    for depth_cap in range(min_depth, cap + 1):
         t0 = time.time()
-        found, path, used = [], [], set()
         deadline = t0 + max_seconds
-        timed_out = [False]
+        found, path, used = [], [], set()
+        nodes = [0]
+        fail = {}
 
         def dfs(cell, covered, depth):
-            if time.time() > deadline:
+            """Returns the used-words this subtree's outcome depended on."""
+            nodes[0] += 1
+            if not nodes[0] & 0x3FF and time.time() > deadline:
                 raise TimedOut()
             if covered == FULL:
                 found.append(path[:])
-                return
+                return EMPTY
             if depth == 0:
-                return
-            remaining = bin(FULL & ~covered).count("1")
-            if remaining > max_cov[cell] + (depth - 1) * 11:
-                return
-            min_new = 0 if depth == 1 else max(0, remaining - (depth - 1) * 11)
-            ranked = []
-            for cov, end, w in all_moves[cell]:
-                if w in used:
-                    continue
-                n_new = bin(cov & ~covered).count("1")
+                return EMPTY
+            left = FULL & ~covered
+            if left & ~reach[depth][cell]:
+                return EMPTY
+            remaining = left.bit_count()
+            if remaining > max_cov[cell] + (depth - 1) * MAXNEW:
+                return EMPTY
+
+            if depth == 1:
+                # exact: the last word must finish the board
+                conflict = None
+                for cov, _, wid in all_moves[cell]:
+                    if cov & left != left:
+                        continue
+                    if wid in used:
+                        conflict = {wid} if conflict is None else conflict | {wid}
+                        continue
+                    path.append(wid)
+                    found.append(path[:])
+                    path.pop()
+                return EMPTY if conflict is None else frozenset(conflict)
+
+            key = (cell, covered, depth)
+            prev = fail.get(key)
+            if prev is not None and prev <= used:
+                return prev
+
+            min_new = remaining - (depth - 1) * MAXNEW
+            ranked, conflict = [], set()
+            for cov, end, wid in all_moves[cell]:
+                n_new = (cov & left).bit_count()
                 if n_new < min_new:
                     continue
-                ranked.append((-n_new, cov, end, w))
+                if wid in used:
+                    conflict.add(wid)
+                    continue
+                ranked.append((-n_new, cov, end, wid))
             ranked.sort()
-            for _, cov, end, w in ranked:
-                path.append(w)
-                used.add(w)
-                dfs(end, covered | cov, depth - 1)
+            before = len(found)
+            for _, cov, end, wid in ranked:
+                path.append(wid)
+                used.add(wid)
+                sub = dfs(end, covered | cov, depth - 1)
                 path.pop()
-                used.remove(w)
+                used.remove(wid)
+                if sub:
+                    # a dependence on wid itself recurs whatever the caller used
+                    conflict |= sub - {wid}
+            conflict = frozenset(conflict)
+            if len(found) == before and len(fail) < 2_000_000:
+                fail[key] = conflict
+            return conflict
 
+        timed_out = False
         try:
             dfs(start, bits[start], depth_cap)
         except TimedOut:
-            timed_out[0] = True
+            timed_out = True
 
         if found:
             uniq, seen_seq = [], set()
@@ -213,13 +304,13 @@ def solve(tiles, start, max_seconds=90, verbose=False):
                 t = tuple(s)
                 if t not in seen_seq:
                     seen_seq.add(t)
-                    uniq.append(s)
+                    uniq.append([words[i] for i in s])
             if verbose:
                 print(f"depth {depth_cap}: {len(uniq)} solution(s) "
                       f"in {time.time()-t0:.1f}s"
-                      + ("  [INCOMPLETE — hit time limit]" if timed_out[0] else ""))
-            return uniq, not timed_out[0]
-        if timed_out[0]:
+                      + ("  [INCOMPLETE — hit time limit]" if timed_out else ""))
+            return uniq, not timed_out
+        if timed_out:
             return [], False
     return [], True
 
@@ -240,7 +331,8 @@ if __name__ == "__main__":
     for b in boards:
         tiles = {int(k): v for k, v in b["tiles"].items()}
         print(render(tiles, b["start"]))
-        sols, complete = solve(tiles, b["start"], verbose=True)
+        sols, complete = solve(tiles, b["start"], max_words=len(b["chain"]),
+                               verbose=True)
         print(f"generator: {' -> '.join(w.upper() for w in b['chain'])}")
         for s in sols[:20]:
             print("  " + " -> ".join(w.upper() for w in s))

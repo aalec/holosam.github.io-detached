@@ -10,7 +10,32 @@ of its lowest-scoring solution.
 - The easiest solution is not always the shortest. The generator's chain is
   scored as a candidate even when longer than the minimum.
 - The minimum is taken over all solutions. Truncating the solution list biases
-  the floor upward on boards with many solutions.
+  the floor upward on boards with many solutions, which are the boards whose
+  floor should be lowest. `solve` reports `complete`; a floor taken from an
+  incomplete search is an upper bound and is flagged as such.
+
+## Solver
+
+`scripts/blossom_solver.py`. Iterative deepening on word count over
+(covered_bitmask, end_cell, word_id) moves, capped at the generator chain's
+length — the chain always solves the board, so no answer is above it.
+
+| bound | definition |
+|---|---|
+| `MAXNEW` | most new cells any single move on this board covers; 6-10 in practice, against the 11 implied by the 12-letter cap |
+| `reach[k][cell]` | cells reachable from `cell` within k words; prune when an uncovered cell falls outside |
+| min coverage | per-move floor on new cells, exact at the last word |
+| fail memo | failed `(cell, covered, depth)` states, since word order permutes into the same state |
+
+The memo stores, per failed state, which used-words the failure depended on,
+and is reused only when those are used again. Successes are not memoized: every
+solution is needed.
+
+One trie serves every board. Walks only follow letters that are on the board,
+so filtering the word list per board changes nothing but the trie's size.
+
+Measured over 6,000 boards: 0.072 s/board, 169,596 solutions, no board hitting
+the time budget.
 
 ## Terms
 

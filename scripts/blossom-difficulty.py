@@ -190,7 +190,8 @@ def score_board(board, max_seconds=90):
     """Board difficulty: the lowest-scoring solution."""
     tiles = {int(k): v for k, v in board["tiles"].items()}
     start = board["start"]
-    sols, complete = solve(tiles, start, max_seconds=max_seconds)
+    sols, complete = solve(tiles, start, max_words=len(board["chain"]),
+                           max_seconds=max_seconds)
     cands = [list(s) for s in sols]
     # a longer chain can score lower, so gen.js's chain is always a candidate
     if list(board["chain"]) not in cands:
