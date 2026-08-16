@@ -160,11 +160,15 @@ _ANGLE = {(0, 1): 0, (-1, 1): 60, (-1, 0): 120,
 
 
 def _hex_dist(a, b):
+    """gen.js hexDistance. Not an offset-to-cube conversion — match it exactly,
+    since it is only used to break ties in placeLetter and a different metric
+    silently changes which cell the rule prefers."""
     ra, ca = to_rc(a)
     rb, cb = to_rc(b)
-    x1, z1 = ca - (ra - (ra & 1)) // 2, ra
-    x2, z2 = cb - (rb - (rb & 1)) // 2, rb
-    return max(abs(x1 - x2), abs(-x1 - z1 + x2 + z2), abs(z1 - z2))
+    dr, dc = rb - ra, cb - ca
+    if (dr < 0 and dc < 0) or (dr >= 0 and dc >= 0):
+        return abs(dr + dc)
+    return max(abs(dr), abs(dc))
 
 
 def ungeneratable(walks, tiles, start):
@@ -253,11 +257,17 @@ def score_board(board, max_seconds=90):
 
     Easiest is decided by ACROSS too — a board's difficulty is how hard its best
     route is relative to other boards.
+
+    Candidates are every solution up to the generator chain's length, not only
+    the shortest. Restricting to minimum length made the hardest boards
+    artifacts of that restriction: seed 4044 had one 6-word solution needing
+    MARMALADE and 828 seven-word ones, and scoring only the first put it at the
+    top of the pool.
     """
     tiles = {int(k): v for k, v in board["tiles"].items()}
     start = board["start"]
     sols, complete = solve(tiles, start, max_words=len(board["chain"]),
-                           max_seconds=max_seconds)
+                           max_seconds=max_seconds, all_depths=True)
     cands = [list(s) for s in sols]
     # a longer chain can score lower, so gen.js's chain is always a candidate
     if list(board["chain"]) not in cands:

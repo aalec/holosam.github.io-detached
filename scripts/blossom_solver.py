@@ -176,12 +176,20 @@ def _moves_from(tiles, nbrs, bits, trie, cell):
     return out
 
 
-def solve(tiles, start, max_words=None, max_seconds=90, verbose=False, lex=None):
+def solve(tiles, start, max_words=None, max_seconds=90, verbose=False, lex=None,
+          all_depths=False):
     """Returns (solutions, complete).
 
-    solutions: distinct minimum-length solutions as word lists.
+    solutions: distinct minimum-length solutions as word lists, or with
+               all_depths, every solution of length <= max_words.
     complete:  False if the time budget expired, making solutions a subset.
     max_words: cap on iterative deepening. Pass len(board["chain"]).
+
+    all_depths runs one pass at max_words instead of deepening. The DFS records
+    on covered == FULL whatever depth remains, so that single pass finds every
+    solution at or below the cap. Scoring needs them: a board's easiest solution
+    is often longer than its shortest, and restricting to minimum length made
+    the hardest boards artifacts of that restriction.
     """
     lex = lex or lexicon()
     words, trie = lex.words, lex.trie
@@ -223,7 +231,8 @@ def solve(tiles, start, max_words=None, max_seconds=90, verbose=False, lex=None)
         reach.append(cur)
 
     EMPTY = frozenset()
-    for depth_cap in range(min_depth, cap + 1):
+    depths = [cap] if all_depths else range(min_depth, cap + 1)
+    for depth_cap in depths:
         t0 = time.time()
         deadline = t0 + max_seconds
         found, path, used = [], [], set()

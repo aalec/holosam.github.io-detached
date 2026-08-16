@@ -7,8 +7,15 @@ Predicts how hard a board is to solve.
 The scored unit is a (board, solution) pair. A board's difficulty is the score
 of its lowest-scoring solution.
 
-- The easiest solution is not always the shortest. The generator's chain is
-  scored as a candidate even when longer than the minimum.
+- The easiest solution is not always the shortest. Candidates are every
+  solution up to the generator chain's length, not only the shortest ones.
+  Restricting to minimum length made the hardest boards artifacts of that
+  restriction: seed 4044 had one 6-word solution, needing `MARMALADE`, against
+  828 seven-word ones, and scoring only the first put it at the top of the pool
+  at 0.923 where its true floor is 0.719. The chain is never exceeded — it
+  always solves the board, so nothing longer is needed.
+- The effect is confined to the tail. Over 200 boards, floors fell on 4% of
+  them, by 0.002 on average and 0.156 at most.
 - The minimum is taken over all solutions. Truncating the solution list biases
   the floor upward on boards with many solutions, which are the boards whose
   floor should be lowest. `solve` reports `complete`; a floor from an incomplete
@@ -96,11 +103,18 @@ nothing.
 ## ungen
 
 `gen.js` `placeLetter` selects the empty neighbour with the most filled
-neighbours, ties broken by distance to the start tile. Verified exact over
-34,267 placements, 0 exceptions.
+neighbours, ties broken by `hexDistance` to the start tile.
 
 `ungen` replays a solution under that rule, counting steps where the cell
 reached was not the rule's choice.
+
+`hexDistance` must be copied from `gen.js` exactly. It is not an offset-to-cube
+conversion, and substituting one disagrees on 63% of cell pairs. Because it is
+the tie-break, a different metric silently changes which cell the rule prefers:
+under the wrong one the generator's own chain scored 6.71% of its placements as
+deviations, and only 16% of boards had a chain scoring `ungen` 0. Correct, the
+generator's chain scores 0 deviations over 6,905 placements and `ungen` exactly
+0 on 100% of boards, and 73% of boards have an easiest solution with `ungen` 0.
 
 ## out_of_range
 
@@ -142,8 +156,8 @@ moved its group. Presentation order is randomised.
 Rankings of 5 replaced pairs partway through: one ranking yields 10 pairwise
 constraints, so 6 rankings gave 60 against 25 from 25 pairwise rounds.
 
-Current: 14/20 ordered and 3/5 ties on the pairwise rounds, 36/52 ordered and
-14/18 ties on the ranked sets.
+Current: 17/25 direction and 76% magnitude concordance on the pairwise rounds,
+36/52 ordered and 14/18 ties on the ranked sets.
 
 ## Distribution
 
@@ -151,21 +165,24 @@ Current: 14/20 ordered and 3/5 ties on the pairwise rounds, 36/52 ordered and
 
 | board difficulty | |
 |---|---|
-| mean | 0.495 |
-| variance | 0.0163 (sd 0.128) |
-| min / max | 0.026 / 0.828 |
-| p10 / median / p90 | 0.331 / 0.505 / 0.651 |
-| IQR | 0.173 (0.416-0.589) |
+| mean | 0.460 |
+| variance | 0.0162 (sd 0.127) |
+| min / max | 0.026 / 0.820 |
+| p10 / median / p90 | 0.301 / 0.467 / 0.616 |
+| IQR | 0.167 (0.385-0.552) |
+| easiest solution has `ungen` 0 | 73% |
 
 | solution spread within a board | |
 |---|---|
-| boards with >1 solution | 396 of 500 (79%) |
-| median range | 0.677 |
-| mean range | 0.639 |
-| p10 / p90 | 0.077 / 1.078 |
-| max range | 1.287 |
+| boards with >1 solution | 421 of 500 (84%) |
+| median range | 0.856 |
+| mean range | 0.753 |
+| p10 / p90 | 0.101 / 1.199 |
+| max range | 1.507 |
 
-The median within-board spread is 5.3x the SD of board difficulty across the
+Median solutions per board is 8; the largest is 302,747.
+
+The median within-board spread is 6.7x the SD of board difficulty across the
 pool. Which solution a player finds moves difficulty considerably more than
 which board they were given.
 
