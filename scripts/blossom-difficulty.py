@@ -255,8 +255,8 @@ def score_solution(tiles, start, words, walks=None, weights=WITHIN):
 def score_board(board, max_seconds=90):
     """Board difficulty: the ACROSS score of its easiest solution.
 
-    Easiest is decided by ACROSS too — a board's difficulty is how hard its best
-    route is relative to other boards.
+    Easiest is decided by WITHIN, which is the vector fitted to rank solutions
+    against each other on one board.
 
     Candidates are every solution up to the generator chain's length, not only
     the shortest. Restricting to minimum length made the hardest boards
@@ -278,9 +278,13 @@ def score_board(board, max_seconds=90):
         if not r:
             continue
         f = features(tiles, start, list(words), r[0])
-        scored.append((sum(ACROSS.get(k, 0) * v for k, v in f.items()),
-                       sum(WITHIN.get(k, 0) * v for k, v in f.items()),
+        scored.append((sum(WITHIN.get(k, 0) * v for k, v in f.items()),
+                       sum(ACROSS.get(k, 0) * v for k, v in f.items()),
                        words, f))
+    # WITHIN picks which solution a player finds — that is a within-board
+    # ranking. ACROSS then scores that solution against other boards. Selecting
+    # with ACROSS instead let the two vectors disagree about the same board:
+    # on seed 290 it chose a chain with a 3-letter word over the generator's.
     scored.sort(key=lambda x: x[0])
     return dict(tiles=tiles, start=start, scored=scored, complete=complete,
                 n_solutions=len(sols), min_depth=len(sols[0]) if sols else None)
@@ -303,7 +307,7 @@ def main():
         if not r["scored"]:
             print(f"seed {b['seed']}: no solution found")
             continue
-        raw, _, best, _ = r["scored"][0]
+        _, raw, best, _ = r["scored"][0]
         floor = perceived(raw)
         floors.append(floor)
         flag = "" if r["complete"] else "  [search incomplete — floor is an upper bound]"
@@ -317,7 +321,7 @@ def main():
         print()
         print(render(r["tiles"], r["start"]))
         print()
-        for raw, _, words, _ in r["scored"][:args.top]:
+        for _, raw, words, _ in r["scored"][:args.top]:
             tag = "  <- generator" if words == list(b["chain"]) else ""
             print(f"  [{perceived(raw):5.2f}]  "
                   + " -> ".join(w.upper() for w in words) + tag)

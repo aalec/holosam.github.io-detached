@@ -5,8 +5,10 @@ A metric for how hard a board is to solve. Computed by
 
 ## Definition
 
-The scored unit is a (board, solution) pair. A board's difficulty is the score
-of its lowest-scoring solution.
+The scored unit is a (board, solution) pair. A board's difficulty is the
+`ACROSS` score of its easiest solution, where easiest is decided by `WITHIN` —
+choosing which solution a player finds is a within-board ranking, and scoring it
+against other boards is not.
 
 Candidates are every solution up to the generator chain's length, not only the
 shortest. The easiest solution is often not the shortest, and restricting to
@@ -90,18 +92,19 @@ word and players do not learn to look for one.
 
 | board difficulty | | solution spread within a board | |
 |---|---|---|---|
-| mean | 0.460 | boards with >1 solution | 421 of 500 (84%) |
-| variance | 0.0162 (sd 0.127) | median range | 0.856 |
-| min / max | 0.026 / 0.820 | mean range | 0.753 |
-| p10 / median / p90 | 0.301 / 0.467 / 0.616 | p10 / p90 | 0.101 / 1.199 |
-| IQR | 0.167 (0.385-0.552) | max range | 1.507 |
+| mean | 0.499 | boards with >1 solution | 421 of 500 (84%) |
+| variance | 0.0205 (sd 0.143) | median range | 0.856 |
+| min / max | 0.026 / 0.877 | mean range | 0.753 |
+| p10 / median / p90 | 0.318 / 0.507 / 0.678 | p10 / p90 | 0.101 / 1.199 |
+| IQR | 0.196 (0.402-0.598) | max range | 1.507 |
 
-The median within-board spread is 6.7x the SD of board difficulty across the
+The median within-board spread is 6.0x the SD of board difficulty across the
 pool: which solution a player finds moves difficulty considerably more than
 which board they were given.
 
-Board difficulty is tightly clustered, the middle half spanning 0.167 of an
-observed 0.79 range. 73% of boards have an easiest solution with `ungen` 0.
+Board difficulty is tightly clustered, the middle half spanning 0.196 of an
+observed 0.85 range. 86% of boards have an easiest solution that `gen.js`
+placement would have produced exactly (`ungen` 0).
 
 ## Limitations
 
