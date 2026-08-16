@@ -283,7 +283,7 @@
           <ol>
             <li>Start at the highlighted tile. Tap or drag across adjacent tiles to spell a word, then hit Enter. Each new word begins where the last one ended.</li>
             <li>Tiles can be used again, both within a word and across words. Keep linking words until every tile is used. Aim for as few words as you can.</li>
-            <li>The Delete button undoes one letter. If you're stuck, tap 💡 for a hint.</li>
+            <li>Delete undoes one letter. On a keyboard, arrows move between tiles, Space picks one, Enter submits and Delete undoes. If you're stuck, tap 💡 for a hint.</li>
           </ol>
           <p class="bl-modal-foot">The board resets at midnight, so come back tomorrow to play a new one!</p>
           <p class="bl-modal-foot"><a href="/posts/blossom/">Read the story behind Blossom</a>.</p>
@@ -461,9 +461,13 @@
   }
 
   // ─── Keyboard navigation ─────────────────────────────────────────────────
-  // SVG groups, unlike real <button>s, don't fire a click on Enter/Space, so
-  // it's wired explicitly. Focus only follows a change, so a rejected Enter
-  // leaves the cursor put instead of yanking it to the active tile.
+  // SVG groups, unlike real <button>s, don't fire a click on Space, so it's
+  // wired explicitly. Focus only follows a change, so a rejected Space leaves
+  // the cursor put instead of yanking it to the active tile.
+  //
+  // Space picks a letter; Enter and Delete are board-wide (see onGameKey) and
+  // deliberately not handled here, so they mean the same thing whether or not a
+  // tile happens to hold focus.
   const ARROW_DIRS = {
     ArrowLeft: [-1, 0],
     ArrowRight: [1, 0],
@@ -472,7 +476,7 @@
   };
 
   function onTileKey(e, i) {
-    if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+    if (e.key === " " || e.key === "Spacebar") {
       e.preventDefault();
       const before = selection.length;
       onTileClick(i);
@@ -673,7 +677,7 @@
       const i = parseInt(el.getAttribute("data-i"), 10);
       const reachable = paintTile(el, i, ctx);
 
-      const hint = reachable && !selSet.has(i) ? ", press Enter to add" : "";
+      const hint = reachable && !selSet.has(i) ? ", press Space to add" : "";
       el.setAttribute(
         "aria-label",
         `${letterAt(i).toUpperCase()}, ${tileStatus(i, selSet, usedSet, anchor, lastSel)}${hint}`,
@@ -946,6 +950,43 @@
 
   document.getElementById("bl-enter").addEventListener("click", submit);
   document.getElementById("bl-delete").addEventListener("click", deleteLast);
+
+  // Enter submits and Delete/Backspace undoes, wherever focus sits — they act
+  // on the word, not on a tile, so binding them to the grid would make them
+  // work only after the player had tabbed into it.
+  //
+  // Skipped when a native control has focus, since Enter and Space already
+  // click a focused <button> and Backspace edits a focused field; without this,
+  // Enter on the Restart button would restart *and* submit. Also skipped while
+  // a modal is open, where the same keys belong to the dialog.
+  function onGameKey(e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const t = e.target;
+    if (t && t.closest && t.closest("button, a, input, textarea, select")) {
+      return;
+    }
+    if (document.querySelector(".bl-modal:not([hidden])")) return;
+
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const anchor = selection[0];
+      submit();
+      // Follow the chain to the new word's start tile, but only if the grid
+      // held focus — otherwise leave the page's focus where the player put it.
+      if (inGrid(t) && selection[0] !== anchor) focusTile(selection[0]);
+    } else if (e.key === "Backspace" || e.key === "Delete") {
+      // Backspace is browser "back" on a page with no focused field.
+      e.preventDefault();
+      deleteLast();
+      if (inGrid(t)) focusTile(selection[selection.length - 1]);
+    }
+  }
+
+  function inGrid(el) {
+    return !!(el && el.closest && el.closest("#bl-grid"));
+  }
+
+  document.addEventListener("keydown", onGameKey);
   document.getElementById("bl-share").addEventListener("click", share);
   document.getElementById("bl-hint-btn").addEventListener("click", showHint);
 
