@@ -1,18 +1,54 @@
 #!/usr/bin/env python3
-"""Score how hard a Blossom board is.
+"""How hard a Blossom board is to solve.
 
     node scripts/blossom-solve.js --json | python3 scripts/blossom-difficulty.py
     node scripts/blossom-solve.js --json --seeds 0-99 > b.json
-    python3 scripts/blossom-difficulty.py b.json --top 5
+    python3 scripts/blossom-difficulty.py b.json --quiet
 
-Scored unit is a (board, solution) pair. A board's difficulty is the score of
-its lowest-scoring solution.
+A board's difficulty is the ACROSS score of its easiest solution, over every
+solution up to the generator chain's length -- the easiest is often not the
+shortest. Easiest is decided by WITHIN: which solution a player finds is a
+within-board ranking, scoring it against other boards is not.
 
-Two weight vectors. WITHIN ranks solutions on one board; ACROSS ranks boards
-against each other. See assets/blossom/DIFFICULTY.md.
+Two vectors because taking a minimum over solutions selects for low obscurity,
+so word terms compress across board floors while geometry terms do not. Over 139
+multi-solution boards obs_max varies 0.48x as much across floors as within a
+board, against 2.55x for old_frac and 3.15x for hint. WITHIN is fitted on 30
+pairwise human judgments (27/30). ACROSS is set from per-term agreement over 31
+board comparisons: fitting it scored 13/25 leave-one-out against 17/25 for the
+set vector.
 
-Requires prevalence.tsv and frequency.txt, which are not in this repo. Pass
---data DIR or set BLOSSOM_DATA.
+Scores pass through k*log1p((s+0.80)/k), k=1.2. Monotone, so it reorders
+nothing; it compresses the top, where boards stop being distinguishable.
+
+Terms are oriented so larger is harder. Two need explaining:
+
+  obscurity  2.58 - prevalence, the probit proportion of people who report
+             knowing the word. Word, then lemma, then imputed from log frequency
+             (53% / 92% / full coverage of words.js). A lemma's prevalence does
+             not carry to a surface form the corpus does not attest: CHOICEST
+             resolved to CHOICE and scored 0.00, the ceiling, on a form of
+             frequency 0 against the lemma's 77,197. Plurals are exempt, being
+             fully productive.
+  ungen      steps gen.js placeLetter would not have taken. Its hexDistance
+             tie-break must be copied exactly -- an offset-to-cube conversion
+             disagrees on 63% of cell pairs and makes the generator's own chain
+             look ungeneratable.
+
+Over 500 boards: mean 0.499, sd 0.143, IQR 0.196 of an observed 0.85 range.
+Median spread between solutions on one board is 0.856, 6.0x the sd of board
+difficulty, so which solution a player finds matters more than which board they
+were given. 86% of boards have an easiest solution with ungen 0.
+
+Chain length is not modelled: it cannot be isolated in this pool, which holds
+4,093 boards at 6 words against 54 at 4. Tested and dropped: word length,
+reading direction, n-gram entropy, word self-overlap, orthographic
+neighbourhood, concreteness, word_bank membership, obscurity across boards.
+
+Requires prevalence.tsv (word<TAB>probit; Brysbaert et al. US probit norms) and
+frequency.txt (word<SPACE>count; any large list), in scripts/data/ or --data DIR
+or BLOSSOM_DATA. Neither is redistributed, as with the SCOWL dictionary behind
+words.js.
 """
 import argparse
 import collections
@@ -24,46 +60,32 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from blossom_solver import (neighbors, realizations, render, solve, to_rc,
-                            walks_from_seq)
+from blossom_solver import neighbors, realizations, render, solve, to_rc
 
 DATA = os.environ.get("BLOSSOM_DATA",
                       os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
 
-# Ranks solutions on one board. Fitted on 30 within-board judgments.
 WITHIN = {
     "obs_max": 1.0, "obs_early": 1.0, "obs_mean": 0.5,
-    "out_of_range": 0.4, "len_mean": 0.0, "short_frac": 0.0, "rare_min": 0.0,
-    "ungen": 1.0, "revisits": 0.3, "turns": 0.1, "old_frac": 0.3,
+    "out_of_range": 0.4, "rare_min": 0.0, "ungen": 1.0, "revisits": 0.3, "turns": 0.1, "old_frac": 0.3,
     "hint": 0.3, "n_words": 0.1,
 }
 
-# Ranks boards against each other. Set from per-term agreement over 25 pairwise
-# and 6 ranked comparisons, not fitted: fitting failed cross-validation, scoring
-# 13/25 held out against 17/25 for this vector. Obscurity is zero because it
-# carries no cross-board signal — taking a minimum over solutions selects for
-# low obscurity, so little variation survives.
+# Obscurity is zero here: it carries no cross-board signal.
 ACROSS = {
     "old_frac": 1.5, "hint": 1.5, "ungen": 1.0, "out_of_range": 0.5,
     "revisits": 0.3, "rare_min": 0.2, "turns": 0.1, "n_words": 0.1,
     "obs_max": 0.0, "obs_early": 0.0, "obs_mean": 0.0,
-    "len_mean": 0.0, "short_frac": 0.0,
+   
 }
 
 PREV_CEILING = 2.58        # probit scale ceiling
 PREV_FLOOR = -1.0          # absent from both norms and frequency
 GEN_LEN_MIN, GEN_LEN_MAX = 4, 8      # word_bank.txt is 4-8 letters
 
-# Perceived difficulty saturates: above some level boards read as uniformly
-# hard. Monotone, so it reorders nothing; it only widens what counts as
-# indistinguishable at the top.
 SATURATION_K = 1.2
 SCORE_OFFSET = 0.80        # makes every observed raw score positive
 
-# An inflection does not inherit its lemma's familiarity. CHOICEST resolves to
-# CHOICE and scored obscurity 0.00 on a surface form of frequency 0 against the
-# lemma's 77,197. Penalise only forms the corpus does not attest, and exempt
-# plurals: those are fully productive, so an unattested one says nothing.
 UNATTESTED_PENALTY = 0.25
 PRODUCTIVE = {"s", "es", "ies"}
 SUFFIXES = (("s", [""]), ("es", ["", "e"]), ("ies", ["y"]),
@@ -160,9 +182,7 @@ _ANGLE = {(0, 1): 0, (-1, 1): 60, (-1, 0): 120,
 
 
 def _hex_dist(a, b):
-    """gen.js hexDistance. Not an offset-to-cube conversion — match it exactly,
-    since it is only used to break ties in placeLetter and a different metric
-    silently changes which cell the rule prefers."""
+    """gen.js hexDistance, copied exactly. See the module docstring."""
     ra, ca = to_rc(a)
     rb, cb = to_rc(b)
     dr, dc = rb - ra, cb - ca
@@ -172,11 +192,8 @@ def _hex_dist(a, b):
 
 
 def ungeneratable(walks, tiles, start):
-    """Fraction of steps gen.js placement would not produce.
-
-    placeLetter takes the empty neighbour with the most filled neighbours, ties
-    broken by distance to start. Replays the solution under that rule.
-    """
+    """Replays a solution under gen.js placeLetter, counting steps it would
+    not have taken."""
     filled = {start}
     bad = steps = 0
     for wk in walks:
@@ -201,7 +218,6 @@ def features(tiles, start, words, walks):
     decay = [1.0 / (i + 1) for i in range(n)]
     dsum = sum(decay)
     obs = [obscurity(w) for w in words]
-    lens = [len(w) for w in words]
 
     covered = {start}
     revisits = turns = 0
@@ -223,10 +239,8 @@ def features(tiles, start, words, walks):
         "obs_max":      max(obs),
         "obs_early":    sum(o * d for o, d in zip(obs, decay)) / dsum,
         "obs_mean":     sum(obs) / n,
-        "len_mean":     -sum(lens) / n,
-        "short_frac":   sum(1 for x in lens if x <= 4) / n,
-        "out_of_range": sum(1 for x in lens
-                            if x < GEN_LEN_MIN or x > GEN_LEN_MAX) / n,
+        "out_of_range": sum(1 for w in words
+                            if not GEN_LEN_MIN <= len(w) <= GEN_LEN_MAX) / n,
         "rare_min":     -min(letter_rarity(w) for w in words),
         "ungen":        ungeneratable(walks, tiles, start),
         "revisits":     revisits / n,

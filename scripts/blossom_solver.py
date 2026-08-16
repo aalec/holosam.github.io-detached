@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
-"""Blossom solver. Finds every shortest solution to a board.
+"""Blossom solver. Every solution to a board, up to a word-count cap.
 
 Boards come from blossom-solve.js --json.
 
-1. One trie over the whole word list, built once and shared by every board.
-   Walks only follow letters that are on the board, so filtering the list per
-   board changes nothing but the trie's size.
-2. Per start cell, enumerate (covered_bitmask, end_cell, word_id) walks by DFS
-   through the hex graph and the trie.
-3. Iterative deepening on word count, capped at the generator chain's length.
-   The generator's own chain always solves the board, so no answer is above it.
-4. Bounds:
-   a. MAXNEW, the most new cells any single move on this board covers. Replaces
-      the 11 implied by the 12-letter cap, which no generated board reaches.
-   b. reach[k][cell], cells reachable from cell within k words. Prune when an
-      uncovered cell falls outside it.
-   c. Per-move minimum coverage, exact at the last word.
-   d. Memo of failed (cell, covered, depth) states. Word order varies but the
-      states repeat; each entry records the used-words its failure depended on,
-      and is reused only when those are used again.
+One trie over the whole word list, shared by every board; walks only follow
+letters that are on the board, so filtering per board would only shrink the
+trie. Per start cell, enumerate (covered_bitmask, end_cell, word_id) walks, then
+iterative deepening on word count.
+
+Bounds: MAXNEW, the most new cells any one move covers on this board (6-10 in
+practice, against the 11 the 12-letter cap implies); reach[k][cell], cells
+reachable within k words; an exact coverage requirement at the last word; and a
+memo of failed (cell, covered, depth) states, since word order permutes into the
+same state. The memo records which used-words each failure depended on and is
+reused only when those are used again. Successes are never memoized — every
+solution is needed.
+
+0.072 s/board over 6,000 boards.
 """
 import json
 import os
@@ -134,20 +132,6 @@ def realizations(tiles, start, words, limit=1):
         for p in walks_for_word(tiles, words[len(sofar)], cell):
             stack.append((p[-1], sofar + [p], cov | set(p)))
     return out
-
-
-def walks_from_seq(seq, chain):
-    """gen.js placement as one cell-walk per word."""
-    by_word = {}
-    for e in seq:
-        by_word.setdefault(e["wordIdx"], []).append((e["letterIdx"], e["cellIdx"]))
-    walks = []
-    for wi in range(len(chain)):
-        cells = [c for _, c in sorted(by_word[wi])]
-        if wi > 0:
-            cells = [walks[-1][-1]] + cells      # shared tile with previous word
-        walks.append(cells)
-    return walks
 
 
 class TimedOut(Exception):
@@ -322,28 +306,3 @@ def solve(tiles, start, max_words=None, max_seconds=90, verbose=False, lex=None,
         if timed_out:
             return [], False
     return [], True
-
-
-def check(tiles, start, words, valid):
-    """Legal and covers every tile."""
-    if len(set(words)) != len(words):
-        return False, "repeats a word"
-    for w in words:
-        if w not in valid:
-            return False, f"{w} not in BLOSSOM_WORDS"
-    return (bool(realizations(tiles, start, list(words), limit=1)),
-            "not walkable or does not cover every tile")
-
-
-if __name__ == "__main__":
-    boards = json.load(sys.stdin if len(sys.argv) < 2 else open(sys.argv[1]))
-    for b in boards:
-        tiles = {int(k): v for k, v in b["tiles"].items()}
-        print(render(tiles, b["start"]))
-        sols, complete = solve(tiles, b["start"], max_words=len(b["chain"]),
-                               verbose=True)
-        print(f"generator: {' -> '.join(w.upper() for w in b['chain'])}")
-        for s in sols[:20]:
-            print("  " + " -> ".join(w.upper() for w in s))
-        if not complete:
-            print("  (search incomplete)")
